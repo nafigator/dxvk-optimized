@@ -77,12 +77,6 @@ jobs:
           echo "/opt/llvm-mingw/bin" >> "$GITHUB_PATH"
           echo "PATH=/opt/llvm-mingw/bin:$PATH" >> "$GITHUB_ENV"
 
-      - name: Install compiler wrappers
-        run: |
-          install -m 755 .github/helpers/clang-filtered.sh /usr/local/bin/clang-filtered
-          install -m 755 .github/helpers/clang++-filtered.sh /usr/local/bin/clang++-filtered
-          ls -l /usr/local/bin/clang*-filtered
-
       - name: Clone DXVK source
         run: |
           rm -rf dxvk
