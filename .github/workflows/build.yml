@@ -1,0 +1,161 @@
+name: Build DXVK with Clang (x86-64-v4)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name for release (leave empty to auto-generate)'
+        required: false
+        default: ''
+  push:
+    tags:
+      - "v*.*.*"
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  DXVK_VERSION: '3.1.1'
+  MESON_COMMON_ARGS: '--buildtype release'
+
+jobs:
+  build:
+    runs-on: self-hosted
+    container:
+      image: archlinux/archlinux:multilib-devel
+      options: --user root
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      ver: ${{ steps.build.outputs.ver }}
+      archive_name: ${{ steps.pack.outputs.archive_name }}
+    steps:
+      - name: Checkout workflow repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 #v7.0.1
+
+      - name: Determine release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="${{ inputs.tag }}"
+            if [ -z "$TAG" ]; then
+              TAG="v${DXVK_VERSION}-$(date -u +%Y%m%d)-${GITHUB_SHA:0:7}"
+            fi
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Using tag: $TAG"
+
+      - name: Install dependencies
+        run: |
+          pacman -Syu --needed --noconfirm \
+            git meson ninja \
+            clang llvm lld mingw-w64-gcc mingw-w64-crt mingw-w64-headers \
+            glslang python wine
+
+      - name: Install compiler wrappers
+        run: |
+          install -m 755 .github/helpers/clang-filtered.sh /usr/local/bin/clang-filtered
+          install -m 755 .github/helpers/clang++-filtered.sh /usr/local/bin/clang++-filtered
+          ls -l /usr/local/bin/clang*-filtered
+
+      - name: Clone DXVK source
+        run: |
+          rm -rf dxvk
+          echo "TAG (release): $TAG"
+          git clone --depth 1 --branch "${TAG}" \
+            https://github.com/doitsujin/dxvk.git dxvk
+          cd dxvk
+          git submodule update --init --recursive
+
+      - name: Copy Clang cross-files
+        run: |
+          cp .github/helpers/build-win64-clang.txt dxvk/
+          cp .github/helpers/build-win32-clang.txt dxvk/
+          ls -l vkd3d-proton/build-win*-clang.txt
+
+      - name: Build DXVK
+        working-directory: dxvk
+        id: build
+        run: |
+          meson setup build.64-clang --cross-file=build-win64-clang.txt $MESON_COMMON_ARGS
+          ninja -C build.64-clang
+
+          meson setup build.32-clang --cross-file=build-win32-clang.txt $MESON_COMMON_ARGS
+          ninja -C build.32-clang
+
+          VERSION_NAME="${TAG#v}"
+          ls -lh build.64-clang/
+          ls -lh build.32-clang/
+
+          mkdir -p "dxvk-${VERSION_NAME}/x64" "dxvk-${VERSION_NAME}/x86"
+
+          find build.64-clang -name '*.dll' -exec cp {} "dxvk-${VERSION_NAME}/x64/" \;
+          find build.32-clang -name '*.dll' -exec cp {} "dxvk-${VERSION_NAME}/x86/" \;
+
+          [ -f setup_dxvk.sh ] && cp setup_dxvk.sh "dxvk-${VERSION_NAME}/" || true
+
+          tar -caf "dxvk-${VERSION_NAME}.tar.zst" "dxvk-${VERSION_NAME}"
+          echo "Archive created:"
+          ls -lh "dxvk-${VERSION_NAME}.tar.zst"
+          echo "ver=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Locate and copy archive
+        id: pack
+        working-directory: dxvk
+        run: |
+          SRC_ARCHIVE=$(ls dxvk-*.tar.zst | head -1)
+          if [ -z "$SRC_ARCHIVE" ]; then
+            echo "ERROR: no archive found"
+            ls -lh
+            exit 1
+          fi
+          ARCHIVE_NAME=$(basename "$SRC_ARCHIVE")
+          cp "$SRC_ARCHIVE" "../${ARCHIVE_NAME}"
+          echo "archive_name=${ARCHIVE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "Archive: ${ARCHIVE_NAME}"
+          ls -lh "../${ARCHIVE_NAME}"
+
+      - name: Upload archive as artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dxvk-archive
+          path: ${{ steps.pack.outputs.archive_name }}
+          retention-days: 5
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dxvk-archive
+          path: .
+
+      - name: Create or update release with archive
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.build.outputs.tag }}
+          VER: ${{ needs.build.outputs.ver }}
+          ARCHIVE: ${{ needs.build.outputs.archive_name }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — uploading files"
+            gh release upload "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --clobber \
+              "$ARCHIVE"
+          else
+            echo "Creating release $TAG"
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "DXVK ${VER} (x86-64-v4) (${TAG})" \
+              --generate-notes \
+              --latest \
+              "$ARCHIVE"
+          fi
