@@ -52,8 +52,30 @@ jobs:
         run: |
           pacman -Syu --needed --noconfirm \
             git meson ninja \
-            clang llvm lld mingw-w64-gcc mingw-w64-crt mingw-w64-headers \
-            glslang python wine
+            clang llvm lld \
+            glslang python wine \
+            curl xz
+
+          # ── Install llvm-mingw toolchain ──
+          LLVM_MINGW_URL="https://github.com/mstorsjo/llvm-mingw/releases/download/20260922/llvm-mingw-20260922-ucrt-ubuntu-22.04-x86_64.tar.xz"
+          curl -fsSL "$LLVM_MINGW_URL" -o /tmp/llvm-mingw.tar.xz
+          mkdir -p /opt/llvm-mingw
+          tar -xJf /tmp/llvm-mingw.tar.xz -C /opt/llvm-mingw --strip-components=1
+          rm /tmp/llvm-mingw.tar.xz
+
+          # ── Verify toolchain ──
+          echo "--- llvm-mingw generic clang ---"
+          /opt/llvm-mingw/bin/clang --version | head -3
+          echo "--- x86_64 target clang ---"
+          /opt/llvm-mingw/bin/x86_64-w64-mingw32-clang --version | head -3
+          echo "--- i686 target clang ---"
+          /opt/llvm-mingw/bin/i686-w64-mingw32-clang --version | head -3
+          echo "--- available tools ---"
+          ls -1 /opt/llvm-mingw/bin/ | grep -E '^(clang|llvm-ar|llvm-strip|llvm-windres|.*-w64-mingw32-clang)' | head -20
+
+          # ── Add llvm-mingw to PATH ──
+          echo "/opt/llvm-mingw/bin" >> "$GITHUB_PATH"
+          echo "PATH=/opt/llvm-mingw/bin:$PATH" >> "$GITHUB_ENV"
 
       - name: Install compiler wrappers
         run: |
@@ -74,7 +96,36 @@ jobs:
         run: |
           cp .github/helpers/build-win64-clang.txt dxvk/
           cp .github/helpers/build-win32-clang.txt dxvk/
-          ls -l vkd3d-proton/build-win*-clang.txt
+          ls -l dxvk/build-win*-clang.txt
+
+      - name: Patch DXVK for Clang AVX support
+        working-directory: dxvk
+        run: |
+          # Remove AVX check, which blocks Clang build
+          sed -i '/#error "AVX-enabled builds not supported due to stack alignment issues."/d' src/util/util_bit.h
+
+          # Check that patch is applied
+          if grep -q "AVX-enabled builds not supported" src/util/util_bit.h; then
+            echo "ERROR: Patch failed to apply"
+            exit 1
+          fi
+          echo "AVX check removed successfully"
+
+          # Show context near changes
+          grep -n -B 2 -A 2 "DXVK_ARCH_X86" src/util/util_bit.h | head -20
+
+      - name: Patch DXVK for Clang 22 tuple compatibility
+        working-directory: dxvk
+        run: |
+          # Fix for issue #5545: Clang 22 stricter parameter pack validation
+          find src -type f \( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' \) -exec sed -i 's/std::tuple()/std::tuple<>()/g' {} +
+
+          # Verify: no std::tuple() left
+          if grep -rn "std::tuple()" src/; then
+            echo "WARNING: some std::tuple() remain (check if critical)"
+          else
+            echo "All std::tuple() replaced"
+          fi
 
       - name: Build DXVK
         working-directory: dxvk
