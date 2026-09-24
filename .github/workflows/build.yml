@@ -200,7 +200,6 @@ jobs:
             gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --title "DXVK ${VER} (x86-64-v4) (${TAG})" \
-              --generate-notes \
               --latest \
               "$ARCHIVE"
           fi
